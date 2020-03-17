@@ -10,6 +10,14 @@ exclude = [
     "test_data/*",
 ]
 
+[lib]
+name = "rls_analysis"
+path = "src/lib.rs"
+
+[[bin]]
+name = "get-types"
+path = "src/main.rs"
+
 [dependencies]
 rustc-serialize = "0.3"
 log = "0.4"
