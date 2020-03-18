@@ -465,6 +465,17 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         })
     }
 
+    pub fn dump_defs(&self) -> AResult<Vec<(Id, Def)>> {
+	self.with_analysis(|a| {
+	    Some(a.for_all_crates(|c| {
+		Some(c.defs
+		     .iter()
+		     .map(|(_id, _def)| (_id.clone(), _def.clone()))
+		     .collect())
+	    }))
+	})
+    }
+
     fn with_analysis<F, T>(&self, f: F) -> AResult<T>
     where
         F: FnOnce(&Analysis) -> Option<T>,
