@@ -1,11 +1,3 @@
-// Copyright 2017 The RLS Project Developers.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Defines an `AnalysisLoader` trait, which allows to specify directories
 //! from which save-analysis JSON files can be read. Also supplies a
 //! default implementation `CargoAnalysisLoader` for Cargo-emitted save-analysis
@@ -17,7 +9,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use AnalysisHost;
+use crate::AnalysisHost;
 
 #[derive(Debug)]
 pub struct CargoAnalysisLoader {
@@ -37,10 +29,7 @@ pub struct SearchDirectory {
 
 impl CargoAnalysisLoader {
     pub fn new(target: Target) -> CargoAnalysisLoader {
-        CargoAnalysisLoader {
-            path_prefix: None,
-            target,
-        }
+        CargoAnalysisLoader { path_prefix: None, target }
     }
 }
 
@@ -63,7 +52,7 @@ impl AnalysisLoader for CargoAnalysisLoader {
     fn fresh_host(&self) -> AnalysisHost<Self> {
         AnalysisHost::new_with_loader(CargoAnalysisLoader {
             path_prefix: self.path_prefix.clone(),
-            .. CargoAnalysisLoader::new(self.target)
+            ..CargoAnalysisLoader::new(self.target)
         })
     }
 
@@ -72,40 +61,25 @@ impl AnalysisLoader for CargoAnalysisLoader {
     }
 
     fn abs_path_prefix(&self) -> Option<PathBuf> {
-        self.path_prefix.as_ref()
-            .map(|s| Path::new(s).canonicalize().unwrap().to_owned())
+        self.path_prefix.as_ref().map(|s| Path::new(s).canonicalize().unwrap().to_owned())
     }
 
     fn search_directories(&self) -> Vec<SearchDirectory> {
         let path_prefix = self.path_prefix.as_ref().unwrap();
         let target = self.target.to_string();
 
-        let deps_path = path_prefix
-            .join("target")
-            .join("rls")
-            .join(&target)
-            .join("deps")
-            .join("save-analysis");
+        let deps_path =
+            path_prefix.join("target").join("rls").join(&target).join("deps").join("save-analysis");
         // FIXME sys_root_path allows to break out of 'sandbox' - is that Ok?
         // FIXME libs_path and src_path both assume the default `libdir = "lib"`.
         let sys_root_path = sys_root_path();
         let target_triple = extract_target_triple(sys_root_path.as_path());
-        let libs_path = sys_root_path
-            .join("lib")
-            .join("rustlib")
-            .join(&target_triple)
-            .join("analysis");
+        let libs_path =
+            sys_root_path.join("lib").join("rustlib").join(&target_triple).join("analysis");
 
-        let src_path = sys_root_path
-            .join("lib")
-            .join("rustlib")
-            .join("src")
-            .join("rust");
+        let src_path = sys_root_path.join("lib").join("rustlib").join("src").join("rust");
 
-        vec![
-            SearchDirectory::new(libs_path, Some(src_path)),
-            SearchDirectory::new(deps_path, None),
-        ]
+        vec![SearchDirectory::new(libs_path, Some(src_path)), SearchDirectory::new(deps_path, None)]
     }
 }
 
@@ -114,12 +88,11 @@ fn extract_target_triple(sys_root_path: &Path) -> String {
     // otherwise fall back on the rustup-style toolchain path.
     // FIXME: Both methods assume that the target is the host triple,
     // which isn't the case for cross-compilation (rust-lang/rls#309).
-    extract_rustc_host_triple()
-        .unwrap_or_else(|| extract_rustup_target_triple(sys_root_path))
+    extract_rustc_host_triple().unwrap_or_else(|| extract_rustup_target_triple(sys_root_path))
 }
 
 fn extract_rustc_host_triple() -> Option<String> {
-    let rustc = env::var("RUSTC").unwrap_or(String::from("rustc"));
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| String::from("rustc"));
     let verbose_version = Command::new(rustc)
         .arg("--verbose")
         .arg("--version")
@@ -140,18 +113,10 @@ fn extract_rustc_host_triple() -> Option<String> {
 fn extract_rustup_target_triple(sys_root_path: &Path) -> String {
     // Extracts nightly-x86_64-pc-windows-msvc from
     // $HOME/.rustup/toolchains/nightly-x86_64-pc-windows-msvc
-    let toolchain = sys_root_path
-        .iter()
-        .last()
-        .and_then(OsStr::to_str)
-        .expect("extracting toolchain failed");
+    let toolchain =
+        sys_root_path.iter().last().and_then(OsStr::to_str).expect("extracting toolchain failed");
     // Extracts x86_64-pc-windows-msvc from nightly-x86_64-pc-windows-pc
-    let triple = toolchain
-        .splitn(2, '-')
-        .last()
-        .map(String::from)
-        .expect("extracting triple failed");
-    triple
+    toolchain.splitn(2, '-').last().map(String::from).expect("extracting triple failed")
 }
 
 fn sys_root_path() -> PathBuf {
@@ -159,7 +124,7 @@ fn sys_root_path() -> PathBuf {
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
-            Command::new(env::var("RUSTC").unwrap_or(String::from("rustc")))
+            Command::new(env::var("RUSTC").unwrap_or_else(|_| String::from("rustc")))
                 .arg("--print")
                 .arg("sysroot")
                 .output()
@@ -177,7 +142,7 @@ pub enum Target {
 }
 
 impl fmt::Display for Target {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Target::Release => write!(f, "release"),
             Target::Debug => write!(f, "debug"),
@@ -187,39 +152,26 @@ impl fmt::Display for Target {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn windows_path() {
-        let path = Path::new(
-            r#"C:\Users\user\.rustup\toolchains\nightly-x86_64-pc-windows-msvc"#,
-        );
-        assert_eq!(
-            extract_rustup_target_triple(path),
-            String::from("x86_64-pc-windows-msvc")
-        );
+        let path = Path::new(r#"C:\Users\user\.rustup\toolchains\nightly-x86_64-pc-windows-msvc"#);
+        assert_eq!(extract_rustup_target_triple(path), String::from("x86_64-pc-windows-msvc"));
     }
 
     #[test]
     fn unix_path() {
-        let path = Path::new(
-            "/home/user/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu",
-        );
-        assert_eq!(
-            extract_rustup_target_triple(path),
-            String::from("x86_64-unknown-linux-gnu")
-        );
+        let path = Path::new("/home/user/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu");
+        assert_eq!(extract_rustup_target_triple(path), String::from("x86_64-unknown-linux-gnu"));
     }
 
     #[test]
     fn target_triple() {
         let sys_root_path = sys_root_path();
         let target_triple = extract_target_triple(&sys_root_path);
-        let target_path = sys_root_path
-            .join("lib")
-            .join("rustlib")
-            .join(&target_triple);
+        let target_path = sys_root_path.join("lib").join("rustlib").join(&target_triple);
         assert!(target_path.is_dir(), "{:?} is not a directory!", target_path);
     }
 }

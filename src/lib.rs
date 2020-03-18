@@ -1,48 +1,36 @@
-// Copyright 2016 The RLS Project Developers.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-#![feature(type_ascription)]
-#![feature(crate_visibility_modifier)]
+#![warn(rust_2018_idioms)]
 
 #[macro_use]
 extern crate derive_new;
 #[macro_use]
 extern crate log;
+
 extern crate rls_data as data;
 extern crate rls_span as span;
-extern crate rustc_serialize;
-extern crate fst;
-extern crate itertools;
-extern crate json;
 
 mod analysis;
-mod raw;
+mod listings;
 mod loader;
 mod lowering;
-mod listings;
-mod util;
+mod raw;
 mod symbol_query;
 #[cfg(test)]
 mod test;
+mod util;
 
-pub use analysis::{Def, Ref};
 use analysis::Analysis;
-pub use raw::{name_space_for_def_kind, read_analysis_from_files, CrateId, DefKind};
+pub use analysis::{Def, Ident, IdentKind, Ref};
 pub use loader::{AnalysisLoader, CargoAnalysisLoader, SearchDirectory, Target};
+pub use raw::{name_space_for_def_kind, read_analysis_from_files, Crate, CrateId, DefKind};
 pub use symbol_query::SymbolQuery;
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 use std::u64;
 
-#[derive(Debug)]
 pub struct AnalysisHost<L: AnalysisLoader = CargoAnalysisLoader> {
     analysis: Mutex<Option<Analysis>>,
     master_crate_map: Mutex<HashMap<CrateId, u32>>,
@@ -90,23 +78,23 @@ impl Id {
     fn from_crate_and_local(crate_id: u32, local_id: u32) -> Id {
         // Use global crate number for high order bits,
         // then index for least significant bits.
-        Id(((crate_id as u64) << 32) | (local_id as u64))
+        Id((u64::from(crate_id) << 32) | u64::from(local_id))
     }
 }
 
 /// Used to indicate a missing index in the Id.
 pub const NULL: Id = Id(u64::MAX);
 
-type Blacklist<'a> = &'a [&'static str];
-
 macro_rules! clone_field {
-    ($field: ident) => { |x| x.$field.clone() }
+    ($field: ident) => {
+        |x| x.$field.clone()
+    };
 }
 
 macro_rules! def_span {
     ($analysis: expr, $id: expr) => {
         $analysis.with_defs_and_then($id, |def| Some(def.span.clone()))
-    }
+    };
 }
 
 impl AnalysisHost<CargoAnalysisLoader> {
@@ -136,42 +124,33 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         analysis: Vec<data::Analysis>,
         path_prefix: &Path,
         base_dir: &Path,
-        blacklist: Blacklist,
+        blacklist: &[impl AsRef<str> + Debug],
     ) -> AResult<()> {
         self.reload_with_blacklist(path_prefix, base_dir, blacklist)?;
 
-        let crates: Vec<_> = analysis.into_iter()
+        let crates: Vec<_> = analysis
+            .into_iter()
             .map(|analysis| raw::Crate::new(analysis, SystemTime::now(), None, None))
             .collect();
 
-        lowering::lower(
-            crates,
-            base_dir,
-            self,
-            |host, per_crate, id| {
-                let mut a = host.analysis.lock()?;
-                a.as_mut().unwrap().update(id, per_crate);
-                Ok(())
-            },
-        )
+        lowering::lower(crates, base_dir, self, |host, per_crate, id| {
+            let mut a = host.analysis.lock()?;
+            a.as_mut().unwrap().update(id, per_crate);
+            Ok(())
+        })
     }
 
     pub fn reload(&self, path_prefix: &Path, base_dir: &Path) -> AResult<()> {
-        self.reload_with_blacklist(path_prefix, base_dir, &[])
+        self.reload_with_blacklist(path_prefix, base_dir, &[] as &[&str])
     }
 
     pub fn reload_with_blacklist(
         &self,
         path_prefix: &Path,
         base_dir: &Path,
-        blacklist: Blacklist,
+        blacklist: &[impl AsRef<str> + Debug],
     ) -> AResult<()> {
-        trace!(
-            "reload_with_blacklist {:?} {:?} {:?}",
-            path_prefix,
-            base_dir,
-            blacklist
-        );
+        trace!("reload_with_blacklist {:?} {:?} {:?}", path_prefix, base_dir, blacklist);
         let empty = self.analysis.lock()?.is_none();
         if empty || self.loader.lock()?.needs_hard_reload(path_prefix) {
             return self.hard_reload_with_blacklist(path_prefix, base_dir, blacklist);
@@ -192,14 +171,14 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
 
     /// Reloads the entire project's analysis data.
     pub fn hard_reload(&self, path_prefix: &Path, base_dir: &Path) -> AResult<()> {
-        self.hard_reload_with_blacklist(path_prefix, base_dir, &[])
+        self.hard_reload_with_blacklist(path_prefix, base_dir, &[] as &[&str])
     }
 
     pub fn hard_reload_with_blacklist(
         &self,
         path_prefix: &Path,
         base_dir: &Path,
-        blacklist: Blacklist,
+        blacklist: &[impl AsRef<str> + Debug],
     ) -> AResult<()> {
         trace!("hard_reload {:?} {:?}", path_prefix, base_dir);
         // We're going to create a dummy AnalysisHost that we will fill with data,
@@ -211,9 +190,7 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
             let mut fresh_loader = fresh_host.loader.lock().unwrap();
             fresh_loader.set_path_prefix(path_prefix); // TODO: Needed?
 
-            let raw_analysis = read_analysis_from_files(&*fresh_loader,
-                                                        HashMap::new(),
-                                                        blacklist);
+            let raw_analysis = read_analysis_from_files(&*fresh_loader, HashMap::new(), blacklist);
             lowering::lower(raw_analysis, base_dir, &fresh_host, |host, per_crate, id| {
                 let mut a = host.analysis.lock()?;
                 a.as_mut().unwrap().update(id, per_crate);
@@ -251,7 +228,7 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
     }
 
     pub fn get_def(&self, id: Id) -> AResult<Def> {
-        self.with_analysis(|a| a.with_defs(id, |def| def.clone()))
+        self.with_analysis(|a| a.with_defs(id, Clone::clone))
     }
 
     pub fn goto_def(&self, span: &Span) -> AResult<Span> {
@@ -271,8 +248,7 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
             let mut next = id;
             loop {
                 match a.with_defs_and_then(next, |def| {
-                    def.parent
-                        .and_then(|p| a.with_defs(p, |def| (p, def.name.clone())))
+                    def.parent.and_then(|p| a.with_defs(p, |def| (p, def.name.clone())))
                 }) {
                     Some((id, name)) => {
                         result.insert(0, (id, name));
@@ -292,11 +268,11 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         self.with_analysis(|a| {
             Some(
                 a.per_crate
-                .iter()
-                .filter_map(|(crate_id, data)| {
-                    data.root_id.map(|id| (id, crate_id.name.clone()))
-                })
-                .collect()
+                    .iter()
+                    .filter_map(|(crate_id, data)| {
+                        data.root_id.map(|id| (id, crate_id.name.clone()))
+                    })
+                    .collect(),
             )
         })
     }
@@ -316,41 +292,39 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
     // is true, the result will be empty).
     // Note that for large numbers of refs, if `force_unique_spans` is true, then
     // this function might take significantly longer to execute.
-    pub fn find_all_refs(&self, span: &Span, include_decl: bool, force_unique_spans: bool) -> AResult<Vec<Span>> {
+    pub fn find_all_refs(
+        &self,
+        span: &Span,
+        include_decl: bool,
+        force_unique_spans: bool,
+    ) -> AResult<Vec<Span>> {
         let t_start = Instant::now();
         let result = self.with_analysis(|a| {
             a.def_id_for_span(span).map(|id| {
                 if force_unique_spans && a.aliased_imports.contains(&id) {
                     return vec![];
                 }
-                let decl = if include_decl {
-                    def_span!(a, id)
-                } else {
-                    None
-                };
+                let decl = if include_decl { def_span!(a, id) } else { None };
                 let refs = a.with_ref_spans(id, |refs| {
                     if force_unique_spans {
                         for r in refs.iter() {
                             match a.ref_for_span(r) {
-                                Some(Ref::Id(_)) => {},
+                                Some(Ref::Id(_)) => {}
                                 _ => return None,
                             }
                         }
                     }
                     Some(refs.clone())
                 });
-                refs.map(|refs| {
-                    decl.into_iter()
-                        .chain(refs.into_iter())
-                        .collect::<Vec<_>>()
-                }).unwrap_or_else(|| vec![])
+                refs.map(|refs| decl.into_iter().chain(refs.into_iter()).collect::<Vec<_>>())
+                    .unwrap_or_else(|| vec![])
             })
         });
 
         let time = t_start.elapsed();
         info!(
             "find_all_refs: {}s",
-            time.as_secs() as f64 + time.subsec_nanos() as f64 / 1_000_000_000.0
+            time.as_secs() as f64 + f64::from(time.subsec_nanos()) / 1_000_000_000.0
         );
         result
     }
@@ -365,8 +339,7 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
 
     pub fn docs(&self, span: &Span) -> AResult<String> {
         self.with_analysis(|a| {
-            a.def_id_for_span(span)
-                .and_then(|id| a.with_defs(id, clone_field!(docs)))
+            a.def_id_for_span(span).and_then(|id| a.with_defs(id, clone_field!(docs)))
         })
     }
 
@@ -386,7 +359,7 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         let time = t_start.elapsed();
         info!(
             "query_defs: {}",
-            time.as_secs() as f64 + time.subsec_nanos() as f64 / 1_000_000_000.0
+            time.as_secs() as f64 + f64::from(time.subsec_nanos()) / 1_000_000_000.0
         );
 
         result
@@ -399,25 +372,28 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         let result = self.with_analysis(|a| {
             Some(a.with_def_names(name, |defs| {
                 info!("defs: {:?}", defs);
-                defs.into_iter()
+                defs.iter()
                     .flat_map(|id| {
                         a.with_ref_spans(*id, |refs| {
-                            Some(def_span!(a, *id)
-                                .into_iter()
-                                .chain(refs.iter().cloned())
-                                .collect::<Vec<_>>())
-                        }).or_else(|| def_span!(a, *id).map(|s| vec![s]))
-                            .unwrap_or_else(Vec::new)
-                            .into_iter()
+                            Some(
+                                def_span!(a, *id)
+                                    .into_iter()
+                                    .chain(refs.iter().cloned())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .or_else(|| def_span!(a, *id).map(|s| vec![s]))
+                        .unwrap_or_else(Vec::new)
+                        .into_iter()
                     })
-                    .collect(): Vec<Span>
+                    .collect::<Vec<Span>>()
             }))
         });
 
         let time = t_start.elapsed();
         info!(
             "search: {}s",
-            time.as_secs() as f64 + time.subsec_nanos() as f64 / 1_000_000_000.0
+            time.as_secs() as f64 + f64::from(time.subsec_nanos()) / 1_000_000_000.0
         );
         result
     }
@@ -428,39 +404,39 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         let t_start = Instant::now();
         let result = self.with_analysis(|a| {
             a.with_ref_spans(id, |refs| {
-                Some(def_span!(a, id)
-                    .into_iter()
-                    .chain(refs.iter().cloned())
-                    .collect::<Vec<_>>())
-            }).or_else(|| def_span!(a, id).map(|s| vec![s]))
+                Some(def_span!(a, id).into_iter().chain(refs.iter().cloned()).collect::<Vec<_>>())
+            })
+            .or_else(|| def_span!(a, id).map(|s| vec![s]))
         });
 
         let time = t_start.elapsed();
         info!(
             "find_all_refs_by_id: {}s",
-            time.as_secs() as f64 + time.subsec_nanos() as f64 / 1_000_000_000.0
+            time.as_secs() as f64 + f64::from(time.subsec_nanos()) / 1_000_000_000.0
         );
         result
     }
 
     pub fn find_impls(&self, id: Id) -> AResult<Vec<Span>> {
-        self.with_analysis(|a| {
-            Some(a.for_all_crates(|c| c.impls.get(&id).cloned()))
-        })
+        self.with_analysis(|a| Some(a.for_all_crates(|c| c.impls.get(&id).cloned())))
     }
 
     /// Search for a symbol name, returning a list of def_ids for that name.
     pub fn search_for_id(&self, name: &str) -> AResult<Vec<Id>> {
-        self.with_analysis(|a| Some(a.with_def_names(name, |defs| defs.clone())))
+        self.with_analysis(|a| Some(a.with_def_names(name, Clone::clone)))
+    }
+
+    /// Returns all identifiers which overlap the given span.
+    #[cfg(feature = "idents")]
+    pub fn idents(&self, span: &Span) -> AResult<Vec<Ident>> {
+        self.with_analysis(|a| Some(a.idents(span)))
     }
 
     pub fn symbols(&self, file_name: &Path) -> AResult<Vec<SymbolResult>> {
         self.with_analysis(|a| {
             a.with_defs_per_file(file_name, |ids| {
                 ids.iter()
-                    .map(|id| {
-                        a.with_defs(*id, |def| SymbolResult::new(*id, def)).unwrap()
-                    })
+                    .map(|id| a.with_defs(*id, |def| SymbolResult::new(*id, def)).unwrap())
                     .collect()
             })
         })
@@ -507,55 +483,45 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
         }
 
         if def.parent.is_none() && def.qualname.contains('<') {
-            debug!(
-                "mk_doc_url, bailing, found generic qualname: `{}`",
-                def.qualname
-            );
+            debug!("mk_doc_url, bailing, found generic qualname: `{}`", def.qualname);
             return None;
         }
 
         match def.parent {
-            Some(p) => {
-                analysis.with_defs(p, |parent| match def.kind {
-                    DefKind::Field | DefKind::Method | DefKind::Tuple |
-                    DefKind::TupleVariant | DefKind::StructVariant => {
-                        let ns = name_space_for_def_kind(def.kind);
-                        let mut res = AnalysisHost::<L>::mk_doc_url(parent, analysis)
-                            .unwrap_or_else(|| "".into());
-                        res.push_str(&format!("#{}.{}", def.name, ns));
-                        res
-                    }
-                    DefKind::Mod => {
-                        let parent_qualpath = parent.qualname.replace("::", "/");
-                        format!(
-                            "{}/{}/{}/",
-                            analysis.doc_url_base,
-                            parent_qualpath.trim_end_matches('/'),
-                            def.name,
-                        )
-                    }
-                    _ => {
-                        let parent_qualpath = parent.qualname.replace("::", "/");
-                        let ns = name_space_for_def_kind(def.kind);
-                        format!(
-                            "{}/{}/{}.{}.html",
-                            analysis.doc_url_base,
-                            parent_qualpath,
-                            def.name,
-                            ns,
-                        )
-                    }
-                })
-            }
+            Some(p) => analysis.with_defs(p, |parent| match def.kind {
+                DefKind::Field
+                | DefKind::Method
+                | DefKind::Tuple
+                | DefKind::TupleVariant
+                | DefKind::StructVariant => {
+                    let ns = name_space_for_def_kind(def.kind);
+                    let mut res = AnalysisHost::<L>::mk_doc_url(parent, analysis)
+                        .unwrap_or_else(|| "".into());
+                    res.push_str(&format!("#{}.{}", def.name, ns));
+                    res
+                }
+                DefKind::Mod => {
+                    let parent_qualpath = parent.qualname.replace("::", "/");
+                    format!(
+                        "{}/{}/{}/",
+                        analysis.doc_url_base,
+                        parent_qualpath.trim_end_matches('/'),
+                        def.name,
+                    )
+                }
+                _ => {
+                    let parent_qualpath = parent.qualname.replace("::", "/");
+                    let ns = name_space_for_def_kind(def.kind);
+                    format!(
+                        "{}/{}/{}.{}.html",
+                        analysis.doc_url_base, parent_qualpath, def.name, ns,
+                    )
+                }
+            }),
             None => {
                 let qualpath = def.qualname.replace("::", "/");
                 let ns = name_space_for_def_kind(def.kind);
-                Some(format!(
-                    "{}/{}.{}.html",
-                    analysis.doc_url_base,
-                    qualpath,
-                    ns,
-                ))
+                Some(format!("{}/{}.{}.html", analysis.doc_url_base, qualpath, ns,))
             }
         }
     }
@@ -579,23 +545,20 @@ impl<L: AnalysisLoader> AnalysisHost<L> {
 }
 
 impl ::std::fmt::Display for Id {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        self.0.fmt(f)
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::std::fmt::Display::fmt(&self.0, f)
     }
 }
 
-impl ::std::error::Error for AError {
-    fn description(&self) -> &str {
-        match *self {
-            AError::MutexPoison => "poison error in a mutex (usually a secondary error)",
-            AError::Unclassified => "unknown error",
-        }
-    }
-}
+impl ::std::error::Error for AError {}
 
 impl ::std::fmt::Display for AError {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        write!(f, "{}", ::std::error::Error::description(self))
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        let description = match self {
+            AError::MutexPoison => "poison error in a mutex (usually a secondary error)",
+            AError::Unclassified => "unknown error",
+        };
+        write!(f, "{}", description)
     }
 }
 

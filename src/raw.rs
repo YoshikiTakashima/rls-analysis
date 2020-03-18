@@ -1,24 +1,19 @@
-// Copyright 2016 The RLS Project Developers.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use {AnalysisLoader, Blacklist};
-use json;
-use listings::{DirectoryListing, ListingKind};
-pub use data::{CratePreludeData, Def, DefKind, GlobalCrateId as CrateId, Import,
-               Ref, Relation, RelationKind, SigElement, Signature, SpanData};
-use data::Analysis;
 use data::config::Config;
+use data::Analysis;
+pub use data::{
+    CratePreludeData, Def, DefKind, GlobalCrateId as CrateId, Import, Ref, Relation, RelationKind,
+    SigElement, Signature, SpanData,
+};
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
+
+use crate::listings::{DirectoryListing, ListingKind};
+use crate::AnalysisLoader;
 
 #[derive(Debug)]
 pub struct Crate {
@@ -30,7 +25,12 @@ pub struct Crate {
 }
 
 impl Crate {
-    pub fn new(analysis: Analysis, timestamp: SystemTime, path: Option<PathBuf>, path_rewrite: Option<PathBuf>) -> Crate {
+    pub fn new(
+        analysis: Analysis,
+        timestamp: SystemTime,
+        path: Option<PathBuf>,
+        path_rewrite: Option<PathBuf>,
+    ) -> Crate {
         Crate {
             id: analysis.prelude.as_ref().unwrap().crate_id.clone(),
             analysis,
@@ -46,11 +46,12 @@ impl Crate {
 pub fn read_analysis_from_files<L: AnalysisLoader>(
     loader: &L,
     crate_timestamps: HashMap<PathBuf, SystemTime>,
-    crate_blacklist: Blacklist,
+    crate_blacklist: &[impl AsRef<str> + Debug],
 ) -> Vec<Crate> {
     let mut result = vec![];
 
-    loader.search_directories()
+    loader
+        .search_directories()
         .iter()
         .inspect(|dir| trace!("Considering analysis files at {}", dir.path.display()))
         .filter_map(|dir| DirectoryListing::from_path(&dir.path).ok().map(|list| (dir, list)))
@@ -67,9 +68,14 @@ pub fn read_analysis_from_files<L: AnalysisLoader>(
                     let path = dir.path.join(&l.name);
                     let is_fresh = crate_timestamps.get(&path).map_or(true, |t| time > t);
                     if is_fresh {
-                        read_crate_data(&path).map(|analysis| {
-                            result.push(Crate::new(analysis, *time, Some(path), dir.prefix_rewrite.clone()));
-                        });
+                        if let Some(analysis) = read_crate_data(&path) {
+                            result.push(Crate::new(
+                                analysis,
+                                *time,
+                                Some(path),
+                                dir.prefix_rewrite.clone(),
+                            ));
+                        };
                     }
                 }
             }
@@ -87,9 +93,8 @@ pub fn read_analysis_from_files<L: AnalysisLoader>(
     result
 }
 
-fn ignore_data(file_name: &str, crate_blacklist: Blacklist) -> bool {
-    crate_blacklist.iter()
-        .any(|name| file_name.starts_with(&format!("lib{}-", name)))
+fn ignore_data(file_name: &str, crate_blacklist: &[impl AsRef<str>]) -> bool {
+    crate_blacklist.iter().any(|name| file_name.starts_with(&format!("lib{}-", name.as_ref())))
 }
 
 fn read_file_contents(path: &Path) -> io::Result<String> {
@@ -105,61 +110,66 @@ fn read_crate_data(path: &Path) -> Option<Analysis> {
     trace!("read_crate_data {:?}", path);
     let t = Instant::now();
 
-    let buf = read_file_contents(path).or_else(|err| {
-        warn!("couldn't read file: {}", err);
-        Err(err)
-    }).ok()?;
-    let s = ::rustc_serialize::json::decode(&buf).or_else(|err| {
-        warn!("deserialisation error: {:?}", err);
-        json::parse(&buf).map(|parsed| {
-            if let json::JsonValue::Object(obj) = parsed {
-                let expected = Some(json::JsonValue::from(Analysis::new(Config::default()).version));
-                let actual = obj.get("version").map(|v| v.clone());
-                if expected != actual {
-                    warn!("Data file version mismatch; expected {:?} but got {:?}",
-                          expected, actual);
-                }
-            } else {
-                warn!("Data file didn't have a JSON object at the root");
-            }
-        }).map_err(|err| {
-            warn!("Data file was not valid JSON: {:?}", err);
-        }).ok();
+    let buf = read_file_contents(path)
+        .or_else(|err| {
+            warn!("couldn't read file: {}", err);
+            Err(err)
+        })
+        .ok()?;
+    let s = ::serde_json::from_str(&buf)
+        .or_else(|err| {
+            warn!("deserialisation error: {:?}", err);
+            json::parse(&buf)
+                .map(|parsed| {
+                    if let json::JsonValue::Object(obj) = parsed {
+                        let expected =
+                            Some(json::JsonValue::from(Analysis::new(Config::default()).version));
+                        let actual = obj.get("version").cloned();
+                        if expected != actual {
+                            warn!(
+                                "Data file version mismatch; expected {:?} but got {:?}",
+                                expected, actual
+                            );
+                        }
+                    } else {
+                        warn!("Data file didn't have a JSON object at the root");
+                    }
+                })
+                .map_err(|err| {
+                    warn!("Data file was not valid JSON: {:?}", err);
+                })
+                .ok();
 
-        Err(err)
-    }).ok()?;
+            Err(err)
+        })
+        .ok()?;
 
     let d = t.elapsed();
-    info!(
-        "reading {:?} {}.{:09}s",
-        path,
-        d.as_secs(),
-        d.subsec_nanos()
-    );
+    info!("reading {:?} {}.{:09}s", path, d.as_secs(), d.subsec_nanos());
 
     s
 }
 
 pub fn name_space_for_def_kind(dk: DefKind) -> char {
     match dk {
-        DefKind::Enum |
-        DefKind::Struct |
-        DefKind::Union |
-        DefKind::Type |
-        DefKind::ExternType |
-        DefKind::Trait => 't',
-        DefKind::ForeignFunction |
-        DefKind::ForeignStatic |
-        DefKind::Function |
-        DefKind::Method |
-        DefKind::Mod |
-        DefKind::Local |
-        DefKind::Static |
-        DefKind::Const |
-        DefKind::Tuple |
-        DefKind::TupleVariant |
-        DefKind::StructVariant |
-        DefKind::Field => 'v',
+        DefKind::Enum
+        | DefKind::Struct
+        | DefKind::Union
+        | DefKind::Type
+        | DefKind::ExternType
+        | DefKind::Trait => 't',
+        DefKind::ForeignFunction
+        | DefKind::ForeignStatic
+        | DefKind::Function
+        | DefKind::Method
+        | DefKind::Mod
+        | DefKind::Local
+        | DefKind::Static
+        | DefKind::Const
+        | DefKind::Tuple
+        | DefKind::TupleVariant
+        | DefKind::StructVariant
+        | DefKind::Field => 'v',
         DefKind::Macro => 'm',
     }
 }

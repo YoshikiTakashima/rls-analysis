@@ -1,11 +1,3 @@
-// Copyright 2017 The RLS Project Developers.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 #![feature(test)]
 
 extern crate rls_analysis;
@@ -49,11 +41,8 @@ impl AnalysisLoader for TestAnalysisLoader {
 lazy_static! {
     static ref STDLIB_FILE_PATH: PathBuf = PathBuf::from("/checkout/src/libstd/lib.rs");
     static ref STDLIB_DATA_PATH: PathBuf = PathBuf::from("test_data/rust-analysis");
-
     static ref HOST: RwLock<AnalysisHost<TestAnalysisLoader>> = {
-        let host = AnalysisHost::new_with_loader(TestAnalysisLoader::new(
-            STDLIB_DATA_PATH.clone(),
-        ));
+        let host = AnalysisHost::new_with_loader(TestAnalysisLoader::new(STDLIB_DATA_PATH.clone()));
         host.reload(&STDLIB_DATA_PATH, &STDLIB_DATA_PATH).unwrap();
         RwLock::new(host)
     };
@@ -73,7 +62,6 @@ fn search(b: &mut Bencher) {
     let host = HOST.read().unwrap();
     b.iter(|| {
         let _ = host.search("some_inexistent_symbol");
-        
     })
 }
 
